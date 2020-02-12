@@ -497,7 +497,7 @@ impl InputState {
             }
             key_press!(META, '<') => Cmd::BeginningOfHistory,
             key_press!(META, '>') => Cmd::EndOfHistory,
-            key_press!(META, 'B') | key_press!(META, 'b') => {
+            key_press!(META, 'B') | key_press!(META, 'b') | key_press!(META, Left) => {
                 if positive {
                     Cmd::Move(Movement::BackwardWord(n, Word::Emacs))
                 } else {
@@ -512,7 +512,7 @@ impl InputState {
                     Cmd::Kill(Movement::BackwardWord(n, Word::Emacs))
                 }
             }
-            key_press!(META, 'F') | key_press!(META, 'f') => {
+            key_press!(META, 'F') | key_press!(META, 'f') | key_press!(META, Right) => {
                 if positive {
                     Cmd::Move(Movement::ForwardWord(n, At::AfterEnd, Word::Emacs))
                 } else {
