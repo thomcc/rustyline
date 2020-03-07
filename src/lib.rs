@@ -225,7 +225,7 @@ fn complete_line<H: Helper>(
                 }
                 s.refresh_line()?;
             }
-        };
+        }
         Ok(None)
     }
 }

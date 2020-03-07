@@ -12,7 +12,7 @@ use crate::layout::{Layout, Position};
 use crate::line_buffer::LineBuffer;
 use crate::Result;
 
-pub type Mode = ();
+pub struct Mode;
 
 impl RawMode for Mode {
     fn disable_raw_mode(&self) -> Result<()> {
@@ -174,7 +174,7 @@ impl Term for DummyTerminal {
     // Interactive loop:
 
     fn enable_raw_mode(&mut self) -> Result<Mode> {
-        Ok(())
+        Ok(Mode)
     }
 
     fn create_reader(&self, _: &Config) -> Result<IntoIter<KeyPress>> {
