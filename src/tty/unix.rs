@@ -292,6 +292,11 @@ impl EscapeBindings {
         self.bind(Key::Home.ctrl(), "\x1b[7^", false);
         self.bind(Key::End.ctrl(), "\x1b[8^", false);
 
+        self.bind(Key::Up.meta(), "\x1b\x1b[A", false);
+        self.bind(Key::Down.meta(), "\x1b\x1b[B", false);
+        self.bind(Key::Right.meta(), "\x1b\x1b[C", false);
+        self.bind(Key::Left.meta(), "\x1b\x1b[D", false);
+
         self.bind(Key::Up.shift(), "\x1b[a", false);
         self.bind(Key::Down.shift(), "\x1b[b", false);
         self.bind(Key::Right.shift(), "\x1b[c", false);
