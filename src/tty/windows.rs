@@ -1,22 +1,24 @@
 //! Windows specific definitions
-use std::io::{self, Write};
+#![allow(clippy::try_err)] // suggested fix does not work (cannot infer...)
+
+use std::io::{self, ErrorKind, Write};
 use std::mem;
 use std::sync::atomic;
 
-use log::debug;
-use unicode_width::UnicodeWidthChar;
-use winapi::shared::minwindef::{DWORD, WORD};
+use log::{debug, warn};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+use winapi::shared::minwindef::{BOOL, DWORD, FALSE, TRUE, WORD};
 use winapi::um::winnt::{CHAR, HANDLE};
 use winapi::um::{consoleapi, handleapi, processenv, winbase, wincon, winuser};
 
-use super::{RawMode, RawReader, Renderer, Term};
+use super::{width, RawMode, RawReader, Renderer, Term};
 use crate::config::{BellStyle, ColorMode, Config, OutputStreamType};
 use crate::error;
 use crate::highlight::Highlighter;
 use crate::keys::{self, Key, KeyMods, KeyPress};
 use crate::layout::{Layout, Position};
 use crate::line_buffer::LineBuffer;
-use crate::tty::add_prompt_and_highlight;
 use crate::Result;
 
 const STDIN_FILENO: DWORD = winbase::STD_INPUT_HANDLE;
@@ -36,21 +38,18 @@ fn get_std_handle(fd: DWORD) -> Result<HANDLE> {
     Ok(handle)
 }
 
-#[macro_export]
-macro_rules! check {
-    ($funcall:expr) => {{
-        let rc = unsafe { $funcall };
-        if rc == 0 {
-            Err(io::Error::last_os_error())?;
-        }
-        rc
-    }};
+fn check(rc: BOOL) -> Result<()> {
+    if rc == FALSE {
+        Err(io::Error::last_os_error())?
+    } else {
+        Ok(())
+    }
 }
 
 fn get_win_size(handle: HANDLE) -> (usize, usize) {
     let mut info = unsafe { mem::zeroed() };
     match unsafe { wincon::GetConsoleScreenBufferInfo(handle, &mut info) } {
-        0 => (80, 24),
+        FALSE => (80, 24),
         _ => (
             info.dwSize.X as usize,
             (1 + info.srWindow.Bottom - info.srWindow.Top) as usize,
@@ -60,7 +59,7 @@ fn get_win_size(handle: HANDLE) -> (usize, usize) {
 
 fn get_console_mode(handle: HANDLE) -> Result<DWORD> {
     let mut original_mode = 0;
-    check!(consoleapi::GetConsoleMode(handle, &mut original_mode));
+    check(unsafe { consoleapi::GetConsoleMode(handle, &mut original_mode) })?;
     Ok(original_mode)
 }
 
@@ -78,15 +77,11 @@ pub struct ConsoleMode {
 impl RawMode for ConsoleMode {
     /// Disable RAW mode for the terminal.
     fn disable_raw_mode(&self) -> Result<()> {
-        check!(consoleapi::SetConsoleMode(
-            self.stdin_handle,
-            self.original_stdin_mode,
-        ));
+        check(unsafe { consoleapi::SetConsoleMode(self.stdin_handle, self.original_stdin_mode) })?;
         if let Some(original_stdstream_mode) = self.original_stdstream_mode {
-            check!(consoleapi::SetConsoleMode(
-                self.stdstream_handle,
-                original_stdstream_mode,
-            ));
+            check(unsafe {
+                consoleapi::SetConsoleMode(self.stdstream_handle, original_stdstream_mode)
+            })?;
         }
         Ok(())
     }
@@ -117,12 +112,9 @@ impl RawReader for ConsoleRawReader {
         let mut surrogate = 0;
         loop {
             // TODO GetNumberOfConsoleInputEvents
-            check!(consoleapi::ReadConsoleInputW(
-                self.handle,
-                &mut rec,
-                1 as DWORD,
-                &mut count,
-            ));
+            check(unsafe {
+                consoleapi::ReadConsoleInputW(self.handle, &mut rec, 1 as DWORD, &mut count)
+            })?;
 
             if rec.EventType == wincon::WINDOW_BUFFER_SIZE_EVENT {
                 SIGWINCH.store(true, atomic::Ordering::SeqCst);
@@ -249,26 +241,81 @@ impl ConsoleRenderer {
 
     fn get_console_screen_buffer_info(&self) -> Result<wincon::CONSOLE_SCREEN_BUFFER_INFO> {
         let mut info = unsafe { mem::zeroed() };
-        check!(wincon::GetConsoleScreenBufferInfo(self.handle, &mut info));
+        check(unsafe { wincon::GetConsoleScreenBufferInfo(self.handle, &mut info) })?;
         Ok(info)
     }
 
     fn set_console_cursor_position(&mut self, pos: wincon::COORD) -> Result<()> {
-        check!(wincon::SetConsoleCursorPosition(self.handle, pos));
-        Ok(())
+        check(unsafe { wincon::SetConsoleCursorPosition(self.handle, pos) })
     }
 
-    fn clear(&mut self, length: DWORD, pos: wincon::COORD) -> Result<()> {
+    fn clear(&mut self, length: DWORD, pos: wincon::COORD, attr: WORD) -> Result<()> {
         let mut _count = 0;
-        check!(wincon::FillConsoleOutputCharacterA(
-            self.handle,
-            ' ' as CHAR,
-            length,
-            pos,
-            &mut _count,
-        ));
-        Ok(())
+        check(unsafe {
+            wincon::FillConsoleOutputCharacterA(self.handle, ' ' as CHAR, length, pos, &mut _count)
+        })?;
+        check(unsafe {
+            wincon::FillConsoleOutputAttribute(self.handle, attr, length, pos, &mut _count)
+        })
     }
+
+    fn set_cursor_visible(&mut self, visible: BOOL) -> Result<()> {
+        set_cursor_visible(self.handle, visible)
+    }
+
+    // You can't have both ENABLE_WRAP_AT_EOL_OUTPUT and
+    // ENABLE_VIRTUAL_TERMINAL_PROCESSING. So we need to wrap manually.
+    fn wrap_at_eol(&mut self, s: &str, mut col: usize) -> usize {
+        let mut esc_seq = 0;
+        for c in s.graphemes(true) {
+            if c == "\n" {
+                col = 0;
+                self.buffer.push_str(c);
+            } else {
+                let cw = width(c, &mut esc_seq);
+                col += cw;
+                if col > self.cols {
+                    self.buffer.push('\n');
+                    col = cw;
+                }
+                self.buffer.push_str(c);
+            }
+        }
+        if col == self.cols {
+            self.buffer.push('\n');
+            col = 0;
+        }
+        col
+    }
+
+    // position at the start of the prompt, clear to end of previous input
+    fn clear_old_rows(
+        &mut self,
+        info: &wincon::CONSOLE_SCREEN_BUFFER_INFO,
+        layout: &Layout,
+    ) -> Result<()> {
+        let current_row = layout.cursor.row;
+        let old_rows = layout.end.row;
+        let mut coord = info.dwCursorPosition;
+        coord.X = 0;
+        coord.Y -= current_row as i16;
+        self.set_console_cursor_position(coord)?;
+        self.clear(
+            (info.dwSize.X * (old_rows as i16 + 1)) as DWORD,
+            coord,
+            info.wAttributes,
+        )
+    }
+}
+
+fn set_cursor_visible(handle: HANDLE, visible: BOOL) -> Result<()> {
+    let mut info = unsafe { mem::zeroed() };
+    check(unsafe { wincon::GetConsoleCursorInfo(handle, &mut info) })?;
+    if info.bVisible == visible {
+        return Ok(());
+    }
+    info.bVisible = visible;
+    check(unsafe { wincon::SetConsoleCursorInfo(handle, &info) })
 }
 
 impl Renderer for ConsoleRenderer {
@@ -299,37 +346,39 @@ impl Renderer for ConsoleRenderer {
         highlighter: Option<&dyn Highlighter>,
     ) -> Result<()> {
         let default_prompt = new_layout.default_prompt;
-        let mut cursor = new_layout.cursor;
+        let cursor = new_layout.cursor;
         let end_pos = new_layout.end;
-        let current_row = old_layout.cursor.row;
-        let old_rows = old_layout.end.row;
 
         self.buffer.clear();
-        add_prompt_and_highlight(
-            &mut self.buffer,
-            highlighter,
-            line,
-            prompt,
-            default_prompt,
-            &new_layout,
-            &mut cursor,
-        );
-
+        let mut col = 0;
+        if let Some(highlighter) = highlighter {
+            // TODO handle ansi escape code (SetConsoleTextAttribute)
+            // append the prompt
+            col = self.wrap_at_eol(&highlighter.highlight_prompt(prompt, default_prompt), col);
+            // append the input line
+            col = self.wrap_at_eol(&highlighter.highlight(line, line.pos()), col);
+        } else {
+            // append the prompt
+            self.buffer.push_str(prompt);
+            // append the input line
+            self.buffer.push_str(line);
+        }
         // append hint
         if let Some(hint) = hint {
             if let Some(highlighter) = highlighter {
-                self.buffer.push_str(&highlighter.highlight_hint(hint));
+                self.wrap_at_eol(&highlighter.highlight_hint(hint), col);
             } else {
                 self.buffer.push_str(hint);
             }
         }
-        // position at the start of the prompt, clear to end of previous input
         let info = self.get_console_screen_buffer_info()?;
-        let mut coord = info.dwCursorPosition;
-        coord.X = 0;
-        coord.Y -= current_row as i16;
-        self.set_console_cursor_position(coord)?;
-        self.clear((info.dwSize.X * (old_rows as i16 + 1)) as DWORD, coord)?;
+        self.set_cursor_visible(FALSE)?; // just to avoid flickering
+        let handle = self.handle;
+        scopeguard::defer! {
+            let _ = set_cursor_visible(handle, TRUE);
+        }
+        // position at the start of the prompt, clear to end of previous input
+        self.clear_old_rows(&info, old_layout)?;
         // display prompt, input line and hint
         self.write_and_flush(self.buffer.as_bytes())?;
 
@@ -359,15 +408,12 @@ impl Renderer for ConsoleRenderer {
     /// Characters with 2 column width are correctly handled (not split).
     fn calculate_position(&self, s: &str, orig: Position) -> Position {
         let mut pos = orig;
-        for c in s.chars() {
-            let cw = if c == '\n' {
+        for c in s.graphemes(true) {
+            if c == "\n" {
                 pos.col = 0;
                 pos.row += 1;
-                None
             } else {
-                c.width()
-            };
-            if let Some(cw) = cw {
+                let cw = c.width();
                 pos.col += cw;
                 if pos.col > self.cols {
                     pos.row += 1;
@@ -397,9 +443,9 @@ impl Renderer for ConsoleRenderer {
     fn clear_screen(&mut self) -> Result<()> {
         let info = self.get_console_screen_buffer_info()?;
         let coord = wincon::COORD { X: 0, Y: 0 };
-        check!(wincon::SetConsoleCursorPosition(self.handle, coord));
+        check(unsafe { wincon::SetConsoleCursorPosition(self.handle, coord) })?;
         let n = info.dwSize.X as DWORD * info.dwSize.Y as DWORD;
-        self.clear(n, coord)
+        self.clear(n, coord, info.wAttributes)
     }
 
     fn sigwinch(&self) -> bool {
@@ -437,7 +483,15 @@ impl Renderer for ConsoleRenderer {
         debug!(target: "rustyline", "initial cursor location: {:?}, {:?}", info.dwCursorPosition.X, info.dwCursorPosition.Y);
         info.dwCursorPosition.X = 0;
         info.dwCursorPosition.Y += 1;
-        self.set_console_cursor_position(info.dwCursorPosition)
+        let res = self.set_console_cursor_position(info.dwCursorPosition);
+        if let Err(error::ReadlineError::Io(ref e)) = res {
+            if e.kind() == ErrorKind::Other && e.raw_os_error() == Some(87) {
+                warn!(target: "rustyline", "invalid cursor position: ({:?}, {:?}) in ({:?}, {:?})", info.dwCursorPosition.X, info.dwCursorPosition.Y, info.dwSize.X, info.dwSize.Y);
+                println!();
+                return Ok(());
+            }
+        }
+        res
     }
 }
 
@@ -551,20 +605,37 @@ impl Term for Console {
         raw |= wincon::ENABLE_INSERT_MODE;
         raw |= wincon::ENABLE_QUICK_EDIT_MODE;
         raw |= wincon::ENABLE_WINDOW_INPUT;
-        check!(consoleapi::SetConsoleMode(self.stdin_handle, raw));
+        check(unsafe { consoleapi::SetConsoleMode(self.stdin_handle, raw) })?;
 
         let original_stdstream_mode = if self.stdstream_isatty {
             let original_stdstream_mode = get_console_mode(self.stdstream_handle)?;
+
+            let mut mode = original_stdstream_mode;
+            if mode & wincon::ENABLE_WRAP_AT_EOL_OUTPUT == 0 {
+                mode |= wincon::ENABLE_WRAP_AT_EOL_OUTPUT;
+                debug!(target: "rustyline", "activate ENABLE_WRAP_AT_EOL_OUTPUT");
+                unsafe {
+                    assert!(consoleapi::SetConsoleMode(self.stdstream_handle, mode) != 0);
+                }
+            }
             // To enable ANSI colors (Windows 10 only):
             // https://docs.microsoft.com/en-us/windows/console/setconsolemode
-            if original_stdstream_mode & wincon::ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0 {
-                let raw = original_stdstream_mode | wincon::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            self.ansi_colors_supported = mode & wincon::ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0;
+            if self.ansi_colors_supported {
+                if self.color_mode == ColorMode::Disabled {
+                    mode &= !wincon::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+                    debug!(target: "rustyline", "deactivate ENABLE_VIRTUAL_TERMINAL_PROCESSING");
+                    unsafe {
+                        assert!(consoleapi::SetConsoleMode(self.stdstream_handle, mode) != 0);
+                    }
+                } else {
+                    debug!(target: "rustyline", "ANSI colors already enabled");
+                }
+            } else if self.color_mode != ColorMode::Disabled {
+                mode |= wincon::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
                 self.ansi_colors_supported =
-                    unsafe { consoleapi::SetConsoleMode(self.stdstream_handle, raw) != 0 };
+                    unsafe { consoleapi::SetConsoleMode(self.stdstream_handle, mode) != 0 };
                 debug!(target: "rustyline", "ansi_colors_supported: {}", self.ansi_colors_supported);
-            } else {
-                debug!(target: "rustyline", "ANSI colors already enabled");
-                self.ansi_colors_supported = true;
             }
             Some(original_stdstream_mode)
         } else {

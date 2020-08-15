@@ -2,8 +2,8 @@ use std::cmp::{Ord, Ordering, PartialOrd};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Position {
-    pub col: usize,
-    pub row: usize,
+    pub col: usize, // The leftmost column is number 0.
+    pub row: usize, // The highest row is number 0.
 }
 
 impl PartialOrd for Position {
@@ -26,8 +26,8 @@ pub struct Layout {
     /// Prompt Unicode/visible width and height
     pub prompt_size: Position,
     pub default_prompt: bool,
-    /// Cursor position (relative to the end of the prompt)
+    /// Cursor position (relative to the start of the prompt)
     pub cursor: Position,
-    /// Number of rows used so far (from end of prompt to end of input)
+    /// Number of rows used so far (from start of prompt to end of input)
     pub end: Position,
 }

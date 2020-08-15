@@ -15,9 +15,11 @@
 //!     Err(_) => println!("No input"),
 //! }
 //! ```
-// #![feature(non_exhaustive)]
+#![warn(missing_docs)]
+
 #[macro_use]
 mod keys;
+
 pub mod completion;
 pub mod config;
 mod edit;
@@ -319,6 +321,8 @@ fn page_completions<C: Candidate, H: Helper>(
         s.out.write_and_flush(ab.as_bytes())?;
     }
     s.out.write_and_flush(b"\n")?;
+    s.layout.end.row = 0; // dirty way to make clear_old_rows do nothing
+    s.layout.cursor.row = 0;
     s.refresh_line()?;
     Ok(None)
 }
@@ -437,7 +441,13 @@ fn readline_edit<H: Helper>(
 
     let mut rdr = editor.term.create_reader(&editor.config)?;
     if editor.term.is_output_tty() {
-        s.move_cursor_at_leftmost(&mut rdr)?;
+        if let Err(e) = s.move_cursor_at_leftmost(&mut rdr) {
+            if s.out.sigwinch() {
+                s.out.update_size();
+            } else {
+                return Err(e);
+            }
+        }
     }
     s.refresh_line()?;
 
@@ -537,13 +547,13 @@ fn readline_edit<H: Helper>(
                 // Fetch the previous command from the history list.
                 s.edit_history_next(true)?
             }
-            Cmd::LineUpOrPreviousHistory => {
-                if !s.edit_move_line_up(1)? {
+            Cmd::LineUpOrPreviousHistory(n) => {
+                if !s.edit_move_line_up(n)? {
                     s.edit_history_next(true)?
                 }
             }
-            Cmd::LineDownOrNextHistory => {
-                if !s.edit_move_line_down(1)? {
+            Cmd::LineDownOrNextHistory(n) => {
+                if !s.edit_move_line_down(n)? {
                     s.edit_history_next(false)?
                 }
             }
@@ -837,8 +847,13 @@ impl<H: Helper> Editor<H> {
     }
 
     /// Save the history in the specified file.
-    pub fn save_history<P: AsRef<Path> + ?Sized>(&self, path: &P) -> Result<()> {
+    pub fn save_history<P: AsRef<Path> + ?Sized>(&mut self, path: &P) -> Result<()> {
         self.history.save(path)
+    }
+
+    /// Append new entries in the specified file.
+    pub fn append_history<P: AsRef<Path> + ?Sized>(&mut self, path: &P) -> Result<()> {
+        self.history.append(path)
     }
 
     /// Add a new entry in the history.
@@ -895,6 +910,7 @@ impl<H: Helper> Editor<H> {
         }
     }
 
+    /// Returns an iterator over edited lines
     /// ```
     /// let mut rl = rustyline::Editor::<()>::new();
     /// for readline in rl.iter("> ") {
@@ -909,7 +925,7 @@ impl<H: Helper> Editor<H> {
     ///     }
     /// }
     /// ```
-    pub fn iter<'a>(&'a mut self, prompt: &'a str) -> Iter<'_, H> {
+    pub fn iter<'a>(&'a mut self, prompt: &'a str) -> impl Iterator<Item = Result<String>> + 'a {
         Iter {
             editor: self,
             prompt,
@@ -968,8 +984,7 @@ impl<H: Helper> fmt::Debug for Editor<H> {
     }
 }
 
-/// Edited lines iterator
-pub struct Iter<'a, H: Helper> {
+struct Iter<'a, H: Helper> {
     editor: &'a mut Editor<H>,
     prompt: &'a str,
 }
@@ -992,3 +1007,6 @@ impl<'a, H: Helper> Iterator for Iter<'a, H> {
 extern crate assert_matches;
 #[cfg(test)]
 mod test;
+
+#[cfg(doctest)]
+doc_comment::doctest!("../README.md");

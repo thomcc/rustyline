@@ -10,20 +10,17 @@ use nix::poll::{self, PollFlags};
 use nix::sys::signal;
 use nix::sys::termios;
 use nix::sys::termios::SetArg;
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
-use utf8parse::{Parser, Receiver};
 use qp_trie::Trie;
+use unicode_segmentation::UnicodeSegmentation;
+use utf8parse::{Parser, Receiver};
 
-
-use super::{RawMode, RawReader, Renderer, Term};
+use super::{width, RawMode, RawReader, Renderer, Term};
 use crate::config::{BellStyle, ColorMode, Config, OutputStreamType};
 use crate::error;
 use crate::highlight::Highlighter;
 use crate::keys::{self, Key, KeyMods, KeyPress};
 use crate::layout::{Layout, Position};
 use crate::line_buffer::LineBuffer;
-use crate::tty::add_prompt_and_highlight;
 use crate::Result;
 
 const STDIN_FILENO: RawFd = libc::STDIN_FILENO;
@@ -45,14 +42,34 @@ impl AsRawFd for OutputStreamType {
 
 nix::ioctl_read_bad!(win_size, libc::TIOCGWINSZ, libc::winsize);
 
-#[allow(clippy::identity_conversion)]
+#[allow(clippy::useless_conversion)]
 fn get_win_size<T: AsRawFd + ?Sized>(fileno: &T) -> (usize, usize) {
     use std::mem::zeroed;
+
+    if cfg!(test) {
+        return (80, 24);
+    }
 
     unsafe {
         let mut size: libc::winsize = zeroed();
         match win_size(fileno.as_raw_fd(), &mut size) {
-            Ok(0) => (size.ws_col as usize, size.ws_row as usize), // TODO getCursorPosition
+            Ok(0) => {
+                // In linux pseudo-terminals are created with dimensions of
+                // zero. If host application didn't initialize the correct
+                // size before start we treat zero size as 80 columns and
+                // inifinite rows
+                let cols = if size.ws_col == 0 {
+                    80
+                } else {
+                    size.ws_col as usize
+                };
+                let rows = if size.ws_row == 0 {
+                    usize::max_value()
+                } else {
+                    size.ws_row as usize
+                };
+                (cols, rows)
+            }
             _ => (80, 24),
         }
     }
@@ -135,13 +152,13 @@ type EscapeSeq = smallvec::SmallVec<[u8; 12]>;
 /// Basically a dictionary from escape sequences to keys. It can also tell us if
 /// a sequence cannot possibly result in
 struct EscapeBindings {
-    bindings: Trie<EscapeSeq, KeyPress>
+    bindings: Trie<EscapeSeq, KeyPress>,
 }
 
 impl EscapeBindings {
     pub fn common_unix() -> Self {
         let mut res = Self {
-            bindings: Trie::new()
+            bindings: Trie::new(),
         };
         res.add_common_unix();
         res
@@ -195,7 +212,8 @@ impl EscapeBindings {
     // more-or-less everything we care about to the set of bindings. That said,
     // this is actually fine. These are the strings that are coming out of the
     // terminal, so long as two terminals don't use the same strings to mean
-    // different things, it won't be a problem that we have so many items in our list.
+    // different things, it won't be a problem that we have so many items in our
+    // list.
     fn add_common_unix(&mut self) {
         // Ansi, vt220+, xterm, ...
         self.bind(Key::Up, "\x1b[A", false);
@@ -595,6 +613,25 @@ impl PosixRenderer {
             bell_style,
         }
     }
+
+    fn clear_old_rows(&mut self, layout: &Layout) {
+        use std::fmt::Write;
+        let current_row = layout.cursor.row;
+        let old_rows = layout.end.row;
+        // old_rows < cursor_row if the prompt spans multiple lines and if
+        // this is the default State.
+        let cursor_row_movement = old_rows.saturating_sub(current_row);
+        // move the cursor down as required
+        if cursor_row_movement > 0 {
+            write!(self.buffer, "\x1b[{}B", cursor_row_movement).unwrap();
+        }
+        // clear old rows
+        for _ in 0..old_rows {
+            self.buffer.push_str("\r\x1b[0K\x1b[A");
+        }
+        // clear the line
+        self.buffer.push_str("\r\x1b[0K");
+    }
 }
 
 impl Renderer for PosixRenderer {
@@ -655,34 +692,24 @@ impl Renderer for PosixRenderer {
         self.buffer.clear();
 
         let default_prompt = new_layout.default_prompt;
-        let mut cursor = new_layout.cursor;
+        let cursor = new_layout.cursor;
         let end_pos = new_layout.end;
-        let current_row = old_layout.cursor.row;
-        let old_rows = old_layout.end.row;
 
-        // old_rows < cursor.row if the prompt spans multiple lines and if
-        // this is the default State.
-        let cursor_row_movement = old_rows.saturating_sub(current_row);
-        // move the cursor down as required
-        if cursor_row_movement > 0 {
-            write!(self.buffer, "\x1b[{}B", cursor_row_movement).unwrap();
-        }
-        // clear old rows
-        for _ in 0..old_rows {
-            self.buffer.push_str("\r\x1b[0K\x1b[A");
-        }
-        // clear the line
-        self.buffer.push_str("\r\x1b[0K");
+        self.clear_old_rows(old_layout);
 
-        add_prompt_and_highlight(
-            &mut self.buffer,
-            highlighter,
-            line,
-            prompt,
-            default_prompt,
-            &new_layout,
-            &mut cursor,
-        );
+        if let Some(highlighter) = highlighter {
+            // display the prompt
+            self.buffer
+                .push_str(&highlighter.highlight_prompt(prompt, default_prompt));
+            // display the input line
+            self.buffer
+                .push_str(&highlighter.highlight(line, line.pos()));
+        } else {
+            // display the prompt
+            self.buffer.push_str(prompt);
+            // display the input line
+            self.buffer.push_str(line);
+        }
         // display hint
         if let Some(hint) = hint {
             if let Some(highlighter) = highlighter {
@@ -691,6 +718,10 @@ impl Renderer for PosixRenderer {
                 self.buffer.push_str(hint);
             }
         }
+        // we have to generate our own newline on line wrap
+        if end_pos.col == 0 && end_pos.row > 0 && !self.buffer.ends_with('\n') {
+            self.buffer.push_str("\n");
+        }
         // position the cursor
         let new_cursor_row_movement = end_pos.row - cursor.row;
         // move the cursor up as required
@@ -698,10 +729,10 @@ impl Renderer for PosixRenderer {
             write!(self.buffer, "\x1b[{}A", new_cursor_row_movement).unwrap();
         }
         // position the cursor within the line
-        if cursor.col == 0 {
-            self.buffer.push('\r');
-        } else {
+        if cursor.col > 0 {
             write!(self.buffer, "\r\x1b[{}C", cursor.col).unwrap();
+        } else {
+            self.buffer.push('\r');
         }
 
         self.write_and_flush(self.buffer.as_bytes())?;
@@ -806,36 +837,6 @@ impl Renderer for PosixRenderer {
             self.write_and_flush(b"\n")?;
         }
         Ok(())
-    }
-}
-
-fn width(s: &str, esc_seq: &mut u8) -> usize {
-    if *esc_seq == 1 {
-        if s == "[" {
-            // CSI
-            *esc_seq = 2;
-        } else {
-            // two-character sequence
-            *esc_seq = 0;
-        }
-        0
-    } else if *esc_seq == 2 {
-        if s == ";" || (s.as_bytes()[0] >= b'0' && s.as_bytes()[0] <= b'9') {
-            /*} else if s == "m" {
-            // last
-             *esc_seq = 0;*/
-        } else {
-            // not supported
-            *esc_seq = 0;
-        }
-        0
-    } else if s == "\x1b" {
-        *esc_seq = 1;
-        0
-    } else if s == "\n" {
-        0
-    } else {
-        s.width()
     }
 }
 
@@ -1026,6 +1027,7 @@ fn write_and_flush(out: OutputStreamType, buf: &[u8]) -> Result<()> {
 mod test {
     use super::{Position, PosixRenderer, PosixTerminal, Renderer};
     use crate::config::{BellStyle, OutputStreamType};
+    use crate::line_buffer::LineBuffer;
 
     #[test]
     #[ignore]
@@ -1055,5 +1057,30 @@ mod test {
     fn test_sync() {
         fn assert_sync<T: Sync>() {}
         assert_sync::<PosixTerminal>();
+    }
+
+    #[test]
+    fn test_line_wrap() {
+        let mut out = PosixRenderer::new(OutputStreamType::Stdout, 4, true, BellStyle::default());
+        let prompt = "> ";
+        let default_prompt = true;
+        let prompt_size = out.calculate_position(prompt, Position::default());
+
+        let mut line = LineBuffer::init("", 0, None);
+        let old_layout = out.compute_layout(prompt_size, default_prompt, &line, None);
+        assert_eq!(Position { col: 2, row: 0 }, old_layout.cursor);
+        assert_eq!(old_layout.cursor, old_layout.end);
+
+        assert_eq!(Some(true), line.insert('a', out.cols - prompt_size.col + 1));
+        let new_layout = out.compute_layout(prompt_size, default_prompt, &line, None);
+        assert_eq!(Position { col: 1, row: 1 }, new_layout.cursor);
+        assert_eq!(new_layout.cursor, new_layout.end);
+        out.refresh_line(prompt, &line, None, &old_layout, &new_layout, None)
+            .unwrap();
+        #[rustfmt::skip]
+        assert_eq!(
+            "\r\u{1b}[0K> aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\u{1b}[1C",
+            out.buffer
+        );
     }
 }

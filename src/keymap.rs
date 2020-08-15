@@ -14,8 +14,8 @@ use crate::tty::{RawReader, Term, Terminal};
 pub type RepeatCount = usize;
 
 /// Commands
-// #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Cmd {
     /// abort
     Abort, // Miscellaneous Command
@@ -45,7 +45,9 @@ pub enum Cmd {
     HistorySearchBackward,
     /// history-search-forward
     HistorySearchForward,
+    /// Insert text
     Insert(RepeatCount, String),
+    /// Interrupt signal (Ctrl-C)
     Interrupt,
     /// backward-delete-char, backward-kill-line, backward-kill-word
     /// delete-char, kill-line, kill-word, unix-line-discard, unix-word-rubout,
@@ -57,6 +59,7 @@ pub enum Cmd {
     Move(Movement),
     /// next-history
     NextHistory,
+    /// No action
     Noop,
     /// vi-replace
     Overwrite(char),
@@ -72,6 +75,7 @@ pub enum Cmd {
     ReverseSearchHistory,
     /// self-insert
     SelfInsert(RepeatCount, char),
+    /// Suspend signal (Ctrl-Z on unix platform)
     Suspend,
     /// transpose-chars
     TransposeChars,
@@ -79,6 +83,7 @@ pub enum Cmd {
     TransposeWords(RepeatCount),
     /// undo
     Undo(RepeatCount),
+    /// Unsupported / unexpected
     Unknown,
     /// upcase-word
     UpcaseWord,
@@ -90,26 +95,27 @@ pub enum Cmd {
     YankPop,
     /// moves cursor to the line above or switches to prev history entry if
     /// the cursor is already on the first line
-    LineUpOrPreviousHistory,
+    LineUpOrPreviousHistory(RepeatCount),
     /// moves cursor to the line below or switches to next history entry if
     /// the cursor is already on the last line
-    LineDownOrNextHistory,
+    LineDownOrNextHistory(RepeatCount),
     /// accepts the line when cursor is at the end of the text (non including
     /// trailing whitespace), inserts newline character otherwise
     AcceptOrInsertLine,
 }
 
 impl Cmd {
+    /// Tells if current command should reset kill ring.
     pub fn should_reset_kill_ring(&self) -> bool {
         #[allow(clippy::match_same_arms)]
         match *self {
             Cmd::Kill(Movement::BackwardChar(_)) | Cmd::Kill(Movement::ForwardChar(_)) => true,
             Cmd::ClearScreen
             | Cmd::Kill(_)
-            | Cmd::Replace(_, _)
+            | Cmd::Replace(..)
             | Cmd::Noop
             | Cmd::Suspend
-            | Cmd::Yank(_, _)
+            | Cmd::Yank(..)
             | Cmd::YankPop => false,
             _ => true,
         }
@@ -117,13 +123,13 @@ impl Cmd {
 
     fn is_repeatable_change(&self) -> bool {
         match *self {
-            Cmd::Insert(_, _)
+            Cmd::Insert(..)
             | Cmd::Kill(_)
-            | Cmd::ReplaceChar(_, _)
-            | Cmd::Replace(_, _)
-            | Cmd::SelfInsert(_, _)
+            | Cmd::ReplaceChar(..)
+            | Cmd::Replace(..)
+            | Cmd::SelfInsert(..)
             | Cmd::ViYankTo(_)
-            | Cmd::Yank(_, _) => true,
+            | Cmd::Yank(..) => true,
             // Cmd::TransposeChars | TODO Validate
             _ => false,
         }
@@ -197,26 +203,33 @@ pub enum Word {
 /// Where to move with respect to word boundary
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum At {
+    /// Start of word.
     Start,
+    /// Before end of word.
     BeforeEnd,
+    /// After end of word.
     AfterEnd,
 }
 
 /// Where to paste (relative to cursor position)
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum Anchor {
+    /// After cursor
     After,
+    /// Before cursor
     Before,
 }
 
 /// Vi character search
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum CharSearch {
+    /// Forward search
     Forward(char),
-    // until
+    /// Forward search until
     ForwardBefore(char),
+    /// Backward search
     Backward(char),
-    // until
+    /// Backward search until
     BackwardAfter(char),
 }
 
@@ -233,8 +246,10 @@ impl CharSearch {
 
 /// Where to move
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Movement {
-    WholeLine, // not really a movement
+    /// Whole current line (not really a movement but a range)
+    WholeLine,
     /// beginning-of-line
     BeginningOfLine,
     /// end-of-line
@@ -255,7 +270,8 @@ pub enum Movement {
     LineUp(RepeatCount),
     /// move to the same column on the next line
     LineDown(RepeatCount),
-    WholeBuffer, // not really a movement
+    /// Whole user input (not really a movement but a range)
+    WholeBuffer,
     /// beginning-of-buffer
     BeginningOfBuffer,
     /// end-of-buffer
@@ -365,9 +381,18 @@ impl InputState {
         single_esc_abort: bool,
     ) -> Result<Cmd> {
         match self.mode {
-            EditMode::Emacs => self.emacs(rdr, wrt, single_esc_abort),
-            EditMode::Vi if self.input_mode != InputMode::Command => self.vi_insert(rdr, wrt),
-            EditMode::Vi => self.vi_command(rdr, wrt),
+            EditMode::Emacs => {
+                let key = rdr.next_key(single_esc_abort)?;
+                self.emacs(rdr, wrt, key)
+            }
+            EditMode::Vi if self.input_mode != InputMode::Command => {
+                let key = rdr.next_key(false)?;
+                self.vi_insert(rdr, wrt, key)
+            }
+            EditMode::Vi => {
+                let key = rdr.next_key(false)?;
+                self.vi_command(rdr, wrt, key)
+            }
         }
     }
 
@@ -416,9 +441,8 @@ impl InputState {
         &mut self,
         rdr: &mut R,
         wrt: &mut dyn Refresher,
-        single_esc_abort: bool,
+        mut key: KeyPress,
     ) -> Result<Cmd> {
-        let mut key = rdr.next_key(single_esc_abort)?;
         if let key_press!(META, digit @ '-') = key {
             key = self.emacs_digit_argument(rdr, wrt, digit)?;
         } else if let key_press!(META, digit @ '0'..='9') = key {
@@ -563,8 +587,12 @@ impl InputState {
         }
     }
 
-    fn vi_command<R: RawReader>(&mut self, rdr: &mut R, wrt: &mut dyn Refresher) -> Result<Cmd> {
-        let mut key = rdr.next_key(false)?;
+    fn vi_command<R: RawReader>(
+        &mut self,
+        rdr: &mut R,
+        wrt: &mut dyn Refresher,
+        mut key: KeyPress,
+    ) -> Result<Cmd> {
         if let key_press!(Char(digit @ '1'..='9')) = key {
             key = self.vi_arg_digit(rdr, wrt, digit)?;
         }
@@ -705,11 +733,10 @@ impl InputState {
             key_press!(CTRL, 'G') => Cmd::Abort,
             key_press!('l') | key_press!(' ') => Cmd::Move(Movement::ForwardChar(n)),
             key_press!(CTRL, 'L') => Cmd::ClearScreen,
-            key_press!('+') | key_press!('j') => Cmd::Move(Movement::LineDown(n)),
+            key_press!('+') | key_press!('j') => Cmd::LineDownOrNextHistory(n),
             // TODO: move to the start of the line.
             key_press!(CTRL, 'N') => Cmd::NextHistory,
-            key_press!('-') | key_press!('k') => Cmd::Move(Movement::LineUp(n)),
-
+            key_press!('-') | key_press!('k') => Cmd::LineUpOrPreviousHistory(n),
             // TODO: move to the start of the line.
             key_press!(CTRL, 'P') => Cmd::PreviousHistory,
             key_press!(CTRL, 'R') => {
@@ -730,8 +757,12 @@ impl InputState {
         Ok(cmd)
     }
 
-    fn vi_insert<R: RawReader>(&mut self, rdr: &mut R, wrt: &mut dyn Refresher) -> Result<Cmd> {
-        let key = rdr.next_key(false)?;
+    fn vi_insert<R: RawReader>(
+        &mut self,
+        rdr: &mut R,
+        wrt: &mut dyn Refresher,
+        key: KeyPress,
+    ) -> Result<Cmd> {
         {
             let bindings = self.custom_bindings.read().unwrap();
             if let Some(cmd) = bindings.get(&key) {
@@ -756,6 +787,13 @@ impl InputState {
             key_press!(Tab) => Cmd::Complete,
             // Don't complete hints when the cursor is not at the end of a line
             key_press!(Right) if wrt.has_hint() && wrt.is_cursor_at_end() => Cmd::CompleteHint,
+            key_press!(META, Char(k)) => {
+                debug!(target: "rustyline", "Vi fast command mode: {}", k);
+                self.input_mode = InputMode::Command;
+                wrt.done_inserting();
+
+                self.vi_command(rdr, wrt, KeyPress::from(k))?
+            }
             key_press!(Esc) => {
                 // vi-movement-mode/vi-command-mode
                 self.input_mode = InputMode::Command;
@@ -766,9 +804,9 @@ impl InputState {
         };
         debug!(target: "rustyline", "Vi insert: {:?}", cmd);
         if cmd.is_repeatable_change() {
-            if let (Cmd::Replace(_, _), Cmd::SelfInsert(_, _)) = (&self.last_cmd, &cmd) {
+            if let (Cmd::Replace(..), Cmd::SelfInsert(..)) = (&self.last_cmd, &cmd) {
                 // replacing...
-            } else if let (Cmd::SelfInsert(_, _), Cmd::SelfInsert(_, _)) = (&self.last_cmd, &cmd) {
+            } else if let (Cmd::SelfInsert(..), Cmd::SelfInsert(..)) = (&self.last_cmd, &cmd) {
                 // inserting...
             } else {
                 self.last_cmd = cmd.clone();
@@ -900,8 +938,8 @@ impl InputState {
             }
             key_press!(CTRL, 'J') |
             key_press!(Enter) => Cmd::AcceptLine,
-            key_press!(Down) => Cmd::LineDownOrNextHistory,
-            key_press!(Up) => Cmd::LineUpOrPreviousHistory,
+            key_press!(Down) => Cmd::LineDownOrNextHistory(1),
+            key_press!(Up) => Cmd::LineUpOrPreviousHistory(1),
             key_press!(CTRL, 'R') => Cmd::ReverseSearchHistory,
             key_press!(CTRL, 'S') => Cmd::ForwardSearchHistory, // most terminals override Ctrl+S to suspend execution
             key_press!(CTRL, 'T') => Cmd::TransposeChars,

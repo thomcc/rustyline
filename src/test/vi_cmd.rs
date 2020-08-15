@@ -427,7 +427,6 @@ fn l() {
 #[test]
 fn j() {
     for key in &[KeyPress::from('j'), KeyPress::from('+')] {
-
         assert_cursor(
             EditMode::Vi,
             ("Hel", "lo,\nworld!"),

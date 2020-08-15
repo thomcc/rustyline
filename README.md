@@ -19,8 +19,6 @@ Readline implementation in Rust that is based on [Antirez' Linenoise](https://gi
 
 ## Example
 ```rust
-extern crate rustyline;
-
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -61,7 +59,7 @@ to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rustyline = "6.0.0"
+rustyline = "6.2.0"
 ```
 
 ## Features
@@ -201,6 +199,8 @@ $ # current settings of all terminal attributes:
 $ stty -a
 $ # key bindings:
 $ bind -p
+$ # print out a terminfo description:
+$ infocmp
 ```
 
 ## Similar projects

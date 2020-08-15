@@ -1,31 +1,52 @@
 //! Key constants
 
-/// A key, independent of any modifiers. See KeyPress for the equivalent with modifers.
+/// A key, independent of any modifiers. See KeyPress for the equivalent with
+/// modifers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Key {
-    Char(char),
+    /// Unsupported escape sequence (on unix platform)
     UnknownEscSeq,
-    Backspace, // Ctrl('H')
+    /// ⌫ or `KeyPress::ctrl('H')`
+    Backspace,
+    /// ⇤ (usually Shift-Tab)
     BackTab,
+    /// Paste (on unix platform)
     BracketedPasteStart,
+    /// Paste (on unix platform)
     BracketedPasteEnd,
+    /// Single char
+    Char(char),
+    /// ⌦
     Delete,
+    /// ↓ arrow key
     Down,
+    /// ⇲
     End,
-    Enter, // Ctrl('M')
-    Esc,   // Ctrl('[')
+    /// ↵ or `KeyPress::ctrl('M')`
+    Enter,
+    /// Escape or `KeyPress::ctrl('[')`
+    Esc,
+    /// Function key
     F(u8),
+    /// ⇱
     Home,
+    /// Insert key
     Insert,
+    /// ← arrow key
     Left,
+    /// `Key::Char('\0')`
     Null,
+    /// ⇟
     PageDown,
+    /// ⇞
     PageUp,
+    /// → arrow key
     Right,
-    Tab, // Ctrl('I')
+    /// ⇥ or `KeyPress::ctrl('I')`
+    Tab,
+    /// ↑ arrow key
     Up,
-    #[doc(hidden)]
-    __NonExhaustive,
 }
 
 impl From<char> for Key {
@@ -36,36 +57,43 @@ impl From<char> for Key {
 }
 
 impl Key {
+    /// Create `KeyPress` from Self + modifiers
     #[inline]
     pub const fn with_mods(self, mods: KeyMods) -> KeyPress {
         KeyPress::new(self, mods)
     }
 
+    /// Shift + Self
     #[inline]
     pub const fn shift(self) -> KeyPress {
         self.with_mods(KeyMods::SHIFT)
     }
 
+    /// Ctrl + Self
     #[inline]
     pub const fn ctrl(self) -> KeyPress {
         self.with_mods(KeyMods::CTRL)
     }
 
+    /// Escape + Self or Alt + Self
     #[inline]
     pub const fn meta(self) -> KeyPress {
         self.with_mods(KeyMods::META)
     }
 
+    /// Alt + Shift + Self
     #[inline]
     pub const fn meta_shift(self) -> KeyPress {
         self.with_mods(KeyMods::META_SHIFT)
     }
 
+    /// Ctrl + Shift + Self
     #[inline]
     pub const fn ctrl_shift(self) -> KeyPress {
         self.with_mods(KeyMods::CTRL_SHIFT)
     }
 
+    /// Ctrl + Alt + Shift + Self
     #[inline]
     pub const fn ctrl_meta_shift(self) -> KeyPress {
         self.with_mods(KeyMods::CTRL_META_SHIFT)
@@ -75,20 +103,29 @@ impl Key {
 bitflags::bitflags! {
     /// The set of modifier keys that were triggered along with a key press.
     pub struct KeyMods: u8 {
+        /// Control modifier
         const CTRL  = 0b0001;
+        /// Escape or Alt modifier
         const META  = 0b0010;
+        /// Shift modifier
         const SHIFT = 0b0100;
         // TODO: Should there be an `ALT`?
 
+        /// No modifier
         const NONE = 0;
+        /// Ctrl + Shift
         const CTRL_SHIFT = Self::CTRL.bits | Self::META.bits;
+        /// Alt + Shift
         const META_SHIFT = Self::META.bits | Self::SHIFT.bits;
+        /// Ctrl + Alt
         const CTRL_META = Self::META.bits | Self::CTRL.bits;
+        /// Ctrl + Alt + Shift
         const CTRL_META_SHIFT = Self::META.bits | Self::CTRL.bits | Self::SHIFT.bits;
     }
 }
 
 impl KeyMods {
+    /// Constructor
     #[inline]
     pub fn ctrl_meta_shift(ctrl: bool, meta: bool, shift: bool) -> Self {
         (if ctrl { Self::CTRL } else { Self::NONE })
@@ -107,11 +144,13 @@ impl KeyMods {
 /// ## Notes
 /// - for a `Key::Char` with modifiers, the upper-case character should be used.
 ///   e.g. `key_press!(CTRL, 'A')` and not `key_press!(CTRL, 'a')`.
-/// - Upper-case letters generally will not have `KeyMods::SHIFT` associated with
-///   them.
+/// - Upper-case letters generally will not have `KeyMods::SHIFT` associated
+///   with them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct KeyPress {
+    /// Key code
     pub key: Key,
+    /// Modifiers
     pub mods: KeyMods,
 }
 
@@ -129,78 +168,69 @@ impl From<char> for KeyPress {
 }
 
 impl KeyPress {
-    #[inline]
-    pub const fn new(key: Key, mods: KeyMods) -> Self {
-        Self { key, mods }
-    }
-
-    #[inline]
-    pub fn normal(k: impl Into<Key>) -> Self {
-        Self::new(k.into(), KeyMods::NONE)
-    }
-
-    #[inline]
-    pub fn ctrl(k: impl Into<Key>) -> Self {
-        Self::new(k.into(), KeyMods::CTRL)
-    }
-
-    #[inline]
-    pub fn shift(k: impl Into<Key>) -> Self {
-        Self::new(k.into(), KeyMods::SHIFT)
-    }
-
-    #[inline]
-    pub fn meta(k: impl Into<Key>) -> Self {
-        Self::new(k.into(), KeyMods::META)
-    }
-
     // These are partially here because make updating a lot easier (just turn
     // `KeyPress::Home` into `KeyPress::HOME`). OTOH,
 
     /// Constant value representing an unmodified press of `Key::Backspace`.
     pub const BACKSPACE: Self = Self::new(Key::Backspace, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::BackTab`.
     pub const BACK_TAB: Self = Self::new(Key::BackTab, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::Delete`.
     pub const DELETE: Self = Self::new(Key::Delete, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::Down`.
     pub const DOWN: Self = Self::new(Key::Down, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::End`.
     pub const END: Self = Self::new(Key::End, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::Enter`.
     pub const ENTER: Self = Self::new(Key::Enter, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::Esc`.
     pub const ESC: Self = Self::new(Key::Esc, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::Home`.
     pub const HOME: Self = Self::new(Key::Home, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::Insert`.
     pub const INSERT: Self = Self::new(Key::Insert, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::Left`.
     pub const LEFT: Self = Self::new(Key::Left, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::PageDown`.
     pub const PAGE_DOWN: Self = Self::new(Key::PageDown, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::PageUp`.
     pub const PAGE_UP: Self = Self::new(Key::PageUp, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::Right`.
     pub const RIGHT: Self = Self::new(Key::Right, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::Tab`.
     pub const TAB: Self = Self::new(Key::Tab, KeyMods::NONE);
-
     /// Constant value representing an unmodified press of `Key::Up`.
     pub const UP: Self = Self::new(Key::Up, KeyMods::NONE);
+
+    /// Constructor from `key` code and modifiers
+    #[inline]
+    pub const fn new(key: Key, mods: KeyMods) -> Self {
+        Self { key, mods }
+    }
+
+    /// Constructor from `key` code without modifier
+    #[inline]
+    pub fn normal(k: impl Into<Key>) -> Self {
+        Self::new(k.into(), KeyMods::NONE)
+    }
+
+    /// Constructor from `key` code with Ctrl modifier
+    #[inline]
+    pub fn ctrl(k: impl Into<Key>) -> Self {
+        Self::new(k.into(), KeyMods::CTRL)
+    }
+
+    /// Constructor from `key` code with Shift modifier
+    #[inline]
+    pub fn shift(k: impl Into<Key>) -> Self {
+        Self::new(k.into(), KeyMods::SHIFT)
+    }
+
+    /// Constructor from `key` code with Escape or Alt modifier
+    #[inline]
+    pub fn meta(k: impl Into<Key>) -> Self {
+        Self::new(k.into(), KeyMods::META)
+    }
 }
 
 /// Macro to work around the fact that you can't use the result of a function as
@@ -357,6 +387,7 @@ pub fn char_to_key_press(c: char) -> KeyPress {
 mod tests {
     use super::{char_to_key_press, Key, KeyMods, KeyPress};
     use assert_matches::assert_matches;
+
     #[test]
     fn char_to_key() {
         assert_eq!(KeyPress::ESC, char_to_key_press('\x1b'));
